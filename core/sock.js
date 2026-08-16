@@ -1,8 +1,10 @@
+
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const qrcode = require('qrcode-terminal');
 
 const {
     default: makeWASocket,
@@ -492,19 +494,6 @@ function getQuotedMessage(message) {
    MEDIA HELPERS
 ========================================================================== */
 
-/*
- * Detect media contained in a normal message or quoted message.
- *
- * Returns:
- *
- * image
- * video
- * audio
- * document
- * sticker
- * null
- */
-
 function getMediaType(message) {
     if (!message) {
         return null;
@@ -538,10 +527,6 @@ function getMediaType(message) {
 }
 
 
-/*
- * Return the actual media message object.
- */
-
 function getMediaMessage(message) {
     if (!message) {
         return null;
@@ -574,16 +559,6 @@ function getMediaMessage(message) {
     return null;
 }
 
-
-/*
- * Download a media message.
- *
- * Returns:
- *
- * Buffer
- *
- * or null when no downloadable media exists.
- */
 
 async function downloadMedia(message) {
     try {
@@ -667,10 +642,6 @@ async function downloadMedia(message) {
 }
 
 
-/*
- * Download quoted media.
- */
-
 async function downloadQuotedMedia(message) {
     try {
         const quoted =
@@ -694,13 +665,6 @@ async function downloadQuotedMedia(message) {
     }
 }
 
-
-/*
- * Get media from either:
- *
- * 1. Direct media message
- * 2. Quoted media
- */
 
 async function downloadAnyMedia(message) {
     try {
@@ -1194,20 +1158,10 @@ async function executePlugin(
             )
             : false;
 
-
-    /*
-     * Quoted message.
-     */
-
     const quoted =
         getQuotedMessage(
             message
         );
-
-
-    /*
-     * Detect media.
-     */
 
     const directMediaType =
         getMediaType(
@@ -1218,7 +1172,6 @@ async function executePlugin(
         quoted
             ? getMediaType(quoted)
             : null;
-
 
     const context = {
 
@@ -1301,11 +1254,6 @@ async function executePlugin(
                 message?.key?.fromMe
             ),
 
-
-        /*
-         * MEDIA INFORMATION
-         */
-
         hasMedia:
             Boolean(
                 directMediaType ||
@@ -1318,20 +1266,12 @@ async function executePlugin(
             null,
 
         quotedMediaType:
-
-
             quotedMediaType ||
             null,
-
 
         directMediaType:
             directMediaType ||
             null,
-
-
-        /*
-         * MEDIA DOWNLOADING
-         */
 
         downloadMedia:
             async target =>
@@ -1339,13 +1279,11 @@ async function executePlugin(
                     target || message
                 ),
 
-
         downloadQuotedMedia:
             async () =>
                 downloadQuotedMedia(
                     message
                 ),
-
 
         downloadAnyMedia:
             async () =>
@@ -1353,25 +1291,17 @@ async function executePlugin(
                     message
                 ),
 
-
         getMediaType:
             target =>
                 getMediaType(
                     target || message
                 ),
 
-
         getMediaMessage:
             target =>
                 getMediaMessage(
                     target || message
                 ),
-
-
-        /*
-         * Direct helper specifically
-         * for /enhance and other media commands.
-         */
 
         getQuotedMedia:
             async () => {
@@ -1405,7 +1335,6 @@ async function executePlugin(
                 };
             },
 
-
         getDirectMedia:
             async () => {
 
@@ -1433,7 +1362,6 @@ async function executePlugin(
                     message
                 };
             },
-
 
         mutedUsers:
             global.mutedUsers,
@@ -1468,11 +1396,6 @@ async function executePlugin(
         warns:
             global.warns,
 
-
-        /*
-         * Reply
-         */
-
         reply:
             async (
                 messageText,
@@ -1484,11 +1407,6 @@ async function executePlugin(
                     messageText,
                     options
                 ),
-
-
-        /*
-         * Send text
-         */
 
         sendText:
             async (
@@ -1503,18 +1421,12 @@ async function executePlugin(
                     options
                 ),
 
-
-        /*
-         * Group info
-         */
-
         getGroupInfo:
             async () =>
                 getGroupMetadata(
                     sock,
                     jid
                 ),
-
 
         isAdmin:
             async user =>
@@ -1524,7 +1436,6 @@ async function executePlugin(
                     user
                 ),
 
-
         botIsAdmin:
             async () =>
                 isBotAdmin(
@@ -1532,7 +1443,6 @@ async function executePlugin(
                     jid
                 )
     };
-
 
     try {
 
@@ -1586,7 +1496,6 @@ async function startBot() {
         return currentSocket;
     }
 
-
     try {
 
         initializeAccessLists();
@@ -1599,7 +1508,6 @@ async function startBot() {
 
         global.isPublic =
             configuredMode !== 'private';
-
 
         console.log('');
         console.log(
@@ -1627,7 +1535,6 @@ async function startBot() {
 
         console.log('');
 
-
         const {
             state,
             saveCreds
@@ -1635,7 +1542,6 @@ async function startBot() {
             await useMultiFileAuthState(
                 AUTH_DIR
             );
-
 
         let version;
 
@@ -1661,7 +1567,6 @@ async function startBot() {
             );
         }
 
-
         const socketOptions = {
 
             auth:
@@ -1678,6 +1583,10 @@ async function startBot() {
                 '120.0.0.0'
             ],
 
+            /*
+             * Keep this enabled.
+             * We also explicitly handle the QR below.
+             */
             printQRInTerminal:
                 true,
 
@@ -1695,27 +1604,22 @@ async function startBot() {
                     undefined
         };
 
-
         if (version) {
             socketOptions.version =
                 version;
         }
 
-
         console.log(
             '🔌 Creating WhatsApp connection...'
         );
-
 
         const sock =
             makeWASocket(
                 socketOptions
             );
 
-
         currentSocket =
             sock;
-
 
         sock.ev.on(
             'creds.update',
@@ -1733,8 +1637,62 @@ async function startBot() {
 
                 const {
                     connection,
-                    lastDisconnect
+                    lastDisconnect,
+                    qr
                 } = update;
+
+
+                /*
+                 * ==========================================================
+                 * QR CODE
+                 * ==========================================================
+                 *
+                 * This explicitly renders the QR in Railway logs.
+                 */
+
+                if (qr) {
+
+                    console.log('');
+                    console.log(
+                        '========================================'
+                    );
+                    console.log(
+                        '       📱 SCAN THIS QR CODE'
+                    );
+                    console.log(
+                        '========================================'
+                    );
+
+                    try {
+
+                        qrcode.generate(
+                            qr,
+                            {
+                                small: true
+                            }
+                        );
+
+                    } catch (error) {
+
+                        console.error(
+                            '❌ Could not render QR:',
+                            error.message
+                        );
+
+                        console.log(
+                            'Raw QR received from WhatsApp.'
+                        );
+                    }
+
+                    console.log(
+                        '========================================'
+                    );
+                    console.log('');
+                    console.log(
+                        '📱 WhatsApp → Linked devices → Link a device'
+                    );
+                    console.log('');
+                }
 
 
                 if (
@@ -1755,13 +1713,11 @@ async function startBot() {
 
                     reconnecting = false;
 
-
                     global.BOT_NUMBER =
                         normalizeJid(
                             sock.user?.id ||
                             ''
                         );
-
 
                     global.BOT_LID =
                         normalizeJid(
@@ -1769,10 +1725,8 @@ async function startBot() {
                             ''
                         );
 
-
                     const configuredBot =
                         getConfiguredBotNumber();
-
 
                     if (
                         configuredBot &&
@@ -1785,7 +1739,6 @@ async function startBot() {
                             );
                     }
 
-
                     console.log('');
                     console.log(
                         '========================================'
@@ -1797,7 +1750,6 @@ async function startBot() {
                         '========================================'
                     );
                     console.log('');
-
 
                     console.log(
                         `🤖 Bot: ${BOT_NAME}`
@@ -1823,11 +1775,9 @@ async function startBot() {
                         `🌐 Mode: ${global.isPublic ? 'PUBLIC' : 'PRIVATE'}`
                     );
 
-
                     initializeAccessLists();
 
                     await loadPlugins();
-
 
                     console.log(
                         '✅ CRYSTAL BOT IS ONLINE.'
@@ -1851,13 +1801,11 @@ async function startBot() {
                             null;
                     }
 
-
                     const statusCode =
                         lastDisconnect
                             ?.error
                             ?.output
                             ?.statusCode;
-
 
                     console.error('');
                     console.error(
@@ -1891,11 +1839,9 @@ async function startBot() {
                         reconnecting =
                             true;
 
-
                         console.log(
                             '🔄 Reconnecting in 5 seconds...'
                         );
-
 
                         setTimeout(
                             () => {
@@ -1939,7 +1885,6 @@ async function startBot() {
                     return;
                 }
 
-
                 for (
                     const message
                     of messages
@@ -1954,16 +1899,13 @@ async function startBot() {
                             continue;
                         }
 
-
                         const jid =
                             message.key
                                 ?.remoteJid;
 
-
                         if (!jid) {
                             continue;
                         }
-
 
                         if (
                             jid ===
@@ -1972,29 +1914,24 @@ async function startBot() {
                             continue;
                         }
 
-
                         const fromMe =
                             Boolean(
                                 message.key?.fromMe
                             );
-
 
                         const text =
                             getTextFromMessage(
                                 message
                             );
 
-
                         if (!text) {
                             continue;
                         }
-
 
                         const parsed =
                             parseCommand(
                                 text
                             );
-
 
                         if (!parsed) {
                             continue;
@@ -2010,12 +1947,10 @@ async function startBot() {
                                 message
                             );
 
-
                         const sender =
                             getSender(
                                 message
                             );
-
 
                         const identityList =
                             [
@@ -2043,23 +1978,19 @@ async function startBot() {
                                 identityList
                             );
 
-
                         let sudo =
                             isSudoIdentity(
                                 identityList
                             );
 
-
                         if (fromMe) {
                             owner = true;
                         }
-
 
                         const privileged =
                             owner ||
                             sudo ||
                             fromMe;
-
 
                         const isGroup =
                             jid.endsWith(
@@ -2118,18 +2049,15 @@ async function startBot() {
                                 sender
                             );
 
-
                         const isMuted =
                             global.mutedUsers.has(
                                 normalizedSender
                             );
 
-
                         const isBanned =
                             global.bannedUsers.has(
                                 normalizedSender
                             );
-
 
                         if (
                             !privileged &&
@@ -2143,7 +2071,6 @@ async function startBot() {
 
                             continue;
                         }
-
 
                         if (
                             !privileged &&
@@ -2186,13 +2113,11 @@ async function startBot() {
                                 parsed.command
                             );
 
-
                         if (!plugin) {
 
                             console.log(
                                 `⚠️ No plugin found for /${parsed.command}`
                             );
-
 
                             if (
                                 global.isPublic ||
@@ -2269,13 +2194,11 @@ async function startBot() {
                                 global.welcomeMsg[id] ||
                                 '👋 Welcome @{user}!';
 
-
                             const text =
                                 template.replace(
                                     '{user}',
                                     `@${participant.split('@')[0]}`
                                 );
-
 
                             await sock.sendMessage(
                                 id,
@@ -2304,13 +2227,11 @@ async function startBot() {
                                 global.goodbyeMsg[id] ||
                                 '👋 Goodbye @{user}!';
 
-
                             const text =
                                 template.replace(
                                     '{user}',
                                     `@${participant.split('@')[0]}`
                                 );
-
 
                             await sock.sendMessage(
                                 id,
@@ -2345,16 +2266,13 @@ async function startBot() {
             error
         );
 
-
         currentSocket =
             null;
-
 
         if (!reconnecting) {
 
             reconnecting =
                 true;
-
 
             setTimeout(
                 () => {
@@ -2376,20 +2294,24 @@ async function startBot() {
             );
         }
 
-
         return null;
     }
 }
 
 
 /* ==========================================================================
-   START
-========================================================================== */
-
-
-/* ==========================================================================
    EXPORTS
 ========================================================================== */
+
+/*
+ * IMPORTANT:
+ *
+ * Do NOT call startBot() here.
+ *
+ * index.js is responsible for starting the bot.
+ * Calling startBot() here as well would create two
+ * WhatsApp connections.
+ */
 
 module.exports = {
 
@@ -2437,3 +2359,4 @@ module.exports = {
 
     replyTo
 };
+

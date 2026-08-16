@@ -54,6 +54,7 @@
     "pino": "^7.9.2",
     "pm2": "^6.0.5",
     "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
     "sequelize": "^6.21.4",
     "sqlite": "5.1.1",
     "sqlite3": "^5.0.11",

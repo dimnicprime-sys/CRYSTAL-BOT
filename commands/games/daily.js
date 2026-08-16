@@ -1,0 +1,2 @@
+const {randomInt,ensureJson,saveJson}=require('../_utils');
+module.exports={name:'daily',category:'games',description:'daily game.',async execute(ctx){const db=ensureJson('game-daily.json',{}); const now=Date.now(); const last=db[ctx.sender]||0; if(now-last<86400000)return ctx.reply('⏳ Daily already claimed. Come back tomorrow.'); db[ctx.sender]=now; saveJson('game-daily.json',db); await ctx.reply('🎁 Daily reward: 100 points!');}};

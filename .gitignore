@@ -1,0 +1,10 @@
+node_modules/
+
+# WhatsApp authentication/session
+core/auth_info/
+
+# Bot data
+data/*.json
+
+# Environment/config secrets
+config.env

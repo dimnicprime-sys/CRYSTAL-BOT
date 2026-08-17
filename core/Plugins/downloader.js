@@ -59,6 +59,162 @@ function getPythonCommand() {
 }
 
 /* ==========================================================================
+   YOUTUBE / YT-DLP COMPATIBILITY
+========================================================================== */
+
+/*
+ * YouTube currently uses additional anti-bot / proof-of-origin checks.
+ * yt-dlp's current documentation recommends a PO-token provider for
+ * affected clients. This downloader will automatically use the provider
+ * when it is available, while keeping the existing commands unchanged.
+ *
+ * Optional environment variables:
+ *
+ *   CRYSTAL_POT_URL
+ *     URL of a running bgutil PO-token HTTP provider.
+ *     Default provider URL is http://127.0.0.1:4416
+ *
+ *   CRYSTAL_BGUTIL_SCRIPT
+ *     Full path to bgutil's generate_once.js script.
+ *
+ * The common Windows location is:
+ *
+ *   %USERPROFILE%\\bgutil-ytdlp-pot-provider\\server\\build\\generate_once.js
+ */
+
+function getBgutilScriptPath() {
+    const candidates = [];
+
+    if (process.env.CRYSTAL_BGUTIL_SCRIPT) {
+        candidates.push(
+            process.env.CRYSTAL_BGUTIL_SCRIPT
+        );
+    }
+
+    if (process.env.USERPROFILE) {
+        candidates.push(
+            path.join(
+                process.env.USERPROFILE,
+                'bgutil-ytdlp-pot-provider',
+                'server',
+                'build',
+                'generate_once.js'
+            )
+        );
+    }
+
+    candidates.push(
+        path.join(
+            process.cwd(),
+            'bgutil-ytdlp-pot-provider',
+            'server',
+            'build',
+            'generate_once.js'
+        )
+    );
+
+    for (const candidate of candidates) {
+        if (
+            candidate &&
+            fs.existsSync(candidate)
+        ) {
+            return candidate;
+        }
+    }
+
+    return null;
+}
+
+function getYtDlpCompatibilityArgs() {
+    const args = [
+        /*
+         * Current yt-dlp versions use an external JavaScript runtime
+         * for YouTube challenge solving. Node 20+ is already required
+         * by the current Crystal Bot environment.
+         */
+        '--js-runtimes',
+        'node',
+
+        /*
+         * Let yt-dlp obtain the EJS challenge components when needed.
+         */
+        '--remote-components',
+        'ejs:npm'
+    ];
+
+    const potUrl =
+        String(
+            process.env.CRYSTAL_POT_URL ||
+            ''
+        ).trim();
+
+    const scriptPath =
+        getBgutilScriptPath();
+
+    /*
+     * Prefer the HTTP PO-token provider when explicitly configured.
+     */
+    if (potUrl) {
+        args.push(
+            '--extractor-args',
+            `youtubepot-bgutilhttp:base_url=${potUrl}`
+        );
+
+        /*
+         * mweb is the client recommended by the current
+         * yt-dlp PO-token documentation when using a provider.
+         */
+        args.push(
+            '--extractor-args',
+            'youtube:player-client=mweb'
+        );
+
+        return args;
+    }
+
+    /*
+     * Otherwise use the local bgutil generation script if it exists.
+     */
+    if (scriptPath) {
+        args.push(
+            '--extractor-args',
+            `youtubepot-bgutilscript:script_path=${scriptPath}`
+        );
+
+        args.push(
+            '--extractor-args',
+            'youtube:player-client=mweb'
+        );
+
+        return args;
+    }
+
+    /*
+     * No PO-token provider is installed.
+     *
+     * Keep the downloader usable for videos that YouTube still exposes
+     * without a token, but do not pretend that this bypasses YouTube's
+     * current bot checks.
+     */
+    args.push(
+        '--extractor-args',
+        'youtube:player-client=web_safari'
+    );
+
+    return args;
+}
+
+function hasBgutilProvider() {
+    return Boolean(
+        String(
+            process.env.CRYSTAL_POT_URL ||
+            ''
+        ).trim() ||
+        getBgutilScriptPath()
+    );
+}
+
+/* ==========================================================================
    HELPERS
 ========================================================================== */
 
@@ -260,6 +416,8 @@ async function searchYouTube(query, limit = 5) {
             '-m',
             'yt_dlp',
 
+            ...getYtDlpCompatibilityArgs(),
+
             '--flat-playlist',
 
             '--no-warnings',
@@ -322,6 +480,8 @@ async function getVideoInfo(url) {
             '-m',
             'yt_dlp',
 
+            ...getYtDlpCompatibilityArgs(),
+
             '--dump-single-json',
             '--no-warnings',
             '--skip-download',
@@ -362,6 +522,8 @@ async function downloadAudio(url, directory) {
     const args = [
         '-m',
         'yt_dlp',
+
+        ...getYtDlpCompatibilityArgs(),
 
         '--no-warnings',
         '--no-playlist',
@@ -429,6 +591,8 @@ async function downloadVideo(url, directory) {
     const args = [
         '-m',
         'yt_dlp',
+
+        ...getYtDlpCompatibilityArgs(),
 
         '--no-warnings',
         '--no-playlist',
@@ -727,12 +891,26 @@ function friendlyDownloadError(error) {
 
     if (
         message.includes('sign in') ||
+        message.includes('confirm you') ||
+        message.includes('not a bot') ||
         message.includes('authentication') ||
-        message.includes('age-restricted')
+        message.includes('login_required')
     ) {
+        if (!hasBgutilProvider()) {
+            return (
+                '🔐 *YOUTUBE ANTI-BOT CHECK*\n\n' +
+                'YouTube is currently requiring a Proof-of-Origin (PO) token for this download.\n\n' +
+                'The downloader code is ready to use a bgutil PO-token provider, but no provider is installed/running yet.\n\n' +
+                'Install the provider, then restart Crystal Bot.\n\n' +
+                'Windows provider script location:\n' +
+                '%USERPROFILE%\\bgutil-ytdlp-pot-provider\\server\\build\\generate_once.js'
+            );
+        }
+
         return (
-            '🔐 *YOUTUBE RESTRICTION*\n\n' +
-            'This video requires authentication or is age restricted.'
+            '🔐 *YOUTUBE ANTI-BOT CHECK*\n\n' +
+            'The PO-token provider was detected, but YouTube still rejected this request.\n\n' +
+            'Try the command again or update the PO-token provider and yt-dlp.'
         );
     }
 

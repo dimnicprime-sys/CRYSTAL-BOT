@@ -12,14 +12,6 @@ const { spawn } = require('child_process');
  * CRYSTAL BOT - DOWNLOADER
  * ============================================================================
  *
- * Requires:
- *
- *   python -m pip install -U yt-dlp
- *
- * FFmpeg must also be installed and available in PATH.
- *
- * Your FFmpeg installation is already working.
- *
  * Commands:
  *
  *   /play song name
@@ -28,29 +20,44 @@ const { spawn } = require('child_process');
  *   /ytmp4 YouTube URL
  *   /ytsearch song name
  *
+ * Requirements:
+ *
+ *   python -m pip install -U yt-dlp
+ *
+ * FFmpeg must be installed and available in PATH.
+ *
+ * Your direct yt-dlp test already confirmed that yt-dlp + FFmpeg works.
  * ============================================================================
  */
 
-const TEMP_ROOT = path.join(os.tmpdir(), 'crystal-bot-downloads');
 
-if (!fs.existsSync(TEMP_ROOT)) {
-    fs.mkdirSync(TEMP_ROOT, { recursive: true });
-}
-
-/* ==========================================================================
+/* ============================================================================
    CONFIG
-========================================================================== */
+============================================================================ */
+
+const TEMP_ROOT = path.join(
+    os.tmpdir(),
+    'crystal-bot-downloads'
+);
 
 const MAX_RETRIES = 3;
-const DOWNLOAD_TIMEOUT = 5 * 60 * 1000;
-const SEARCH_TIMEOUT = 60 * 1000;
 
-/*
- * yt-dlp is executed through Python.
- *
- * This avoids depending on Windows having "yt-dlp.exe"
- * directly available in PATH.
- */
+const DOWNLOAD_TIMEOUT =
+    5 * 60 * 1000;
+
+const SEARCH_TIMEOUT =
+    60 * 1000;
+
+if (!fs.existsSync(TEMP_ROOT)) {
+    fs.mkdirSync(TEMP_ROOT, {
+        recursive: true
+    });
+}
+
+
+/* ============================================================================
+   PYTHON
+============================================================================ */
 
 function getPythonCommand() {
     return process.platform === 'win32'
@@ -58,29 +65,90 @@ function getPythonCommand() {
         : 'python3';
 }
 
-/* ==========================================================================
-   YOUTUBE / YT-DLP COMPATIBILITY
-========================================================================== */
+
+/* ============================================================================
+   YT-DLP COMPATIBILITY
+============================================================================ */
 
 /*
- * YouTube currently uses additional anti-bot / proof-of-origin checks.
- * yt-dlp's current documentation recommends a PO-token provider for
- * affected clients. This downloader will automatically use the provider
- * when it is available, while keeping the existing commands unchanged.
+ * IMPORTANT:
  *
- * Optional environment variables:
+ * Do NOT force web_safari here.
  *
- *   CRYSTAL_POT_URL
- *     URL of a running bgutil PO-token HTTP provider.
- *     Default provider URL is http://127.0.0.1:4416
+ * Recent YouTube changes can cause web_safari to expose formats without
+ * usable download URLs, resulting in:
  *
- *   CRYSTAL_BGUTIL_SCRIPT
- *     Full path to bgutil's generate_once.js script.
+ *   Requested format is not available
  *
- * The common Windows location is:
+ * We use the normal yt-dlp client first and android_vr as a fallback.
  *
- *   %USERPROFILE%\\bgutil-ytdlp-pot-provider\\server\\build\\generate_once.js
+ * The user's manual test successfully downloaded:
+ *
+ *   format 251
+ *
+ * using yt-dlp.
  */
+
+function getYtDlpCompatibilityArgs(
+    profile = 'default'
+) {
+    const args = [
+        '--js-runtimes',
+        'deno',
+
+        '--no-warnings',
+        '--no-playlist'
+    ];
+
+    /*
+     * Only force android_vr when explicitly requested.
+     *
+     * Default mode lets the current yt-dlp version select its supported
+     * client configuration.
+     */
+
+    if (profile === 'android_vr') {
+        args.push(
+            '--extractor-args',
+            'youtube:player_client=android_vr'
+        );
+    }
+
+    /*
+     * Optional PO-token provider.
+     *
+     * This is only added when the user actually configured one.
+     */
+
+    const potUrl =
+        String(
+            process.env.CRYSTAL_POT_URL || ''
+        ).trim();
+
+    if (potUrl) {
+        args.push(
+            '--extractor-args',
+            `youtubepot-bgutilhttp:base_url=${potUrl}`
+        );
+    }
+
+    const scriptPath =
+        getBgutilScriptPath();
+
+    if (scriptPath && !potUrl) {
+        args.push(
+            '--extractor-args',
+            `youtubepot-bgutilscript:script_path=${scriptPath}`
+        );
+    }
+
+    return args;
+}
+
+
+/* ============================================================================
+   BGUTIL SCRIPT
+============================================================================ */
 
 function getBgutilScriptPath() {
     const candidates = [];
@@ -125,98 +193,20 @@ function getBgutilScriptPath() {
     return null;
 }
 
-function getYtDlpCompatibilityArgs() {
-    const args = [
-        /*
-         * Current yt-dlp versions use an external JavaScript runtime
-         * for YouTube challenge solving. Node 20+ is already required
-         * by the current Crystal Bot environment.
-         */
-        '--js-runtimes',
-        'node',
-
-        /*
-         * Let yt-dlp obtain the EJS challenge components when needed.
-         */
-        '--remote-components',
-        'ejs:npm'
-    ];
-
-    const potUrl =
-        String(
-            process.env.CRYSTAL_POT_URL ||
-            ''
-        ).trim();
-
-    const scriptPath =
-        getBgutilScriptPath();
-
-    /*
-     * Prefer the HTTP PO-token provider when explicitly configured.
-     */
-    if (potUrl) {
-        args.push(
-            '--extractor-args',
-            `youtubepot-bgutilhttp:base_url=${potUrl}`
-        );
-
-        /*
-         * mweb is the client recommended by the current
-         * yt-dlp PO-token documentation when using a provider.
-         */
-        args.push(
-            '--extractor-args',
-            'youtube:player-client=mweb'
-        );
-
-        return args;
-    }
-
-    /*
-     * Otherwise use the local bgutil generation script if it exists.
-     */
-    if (scriptPath) {
-        args.push(
-            '--extractor-args',
-            `youtubepot-bgutilscript:script_path=${scriptPath}`
-        );
-
-        args.push(
-            '--extractor-args',
-            'youtube:player-client=mweb'
-        );
-
-        return args;
-    }
-
-    /*
-     * No PO-token provider is installed.
-     *
-     * Keep the downloader usable for videos that YouTube still exposes
-     * without a token, but do not pretend that this bypasses YouTube's
-     * current bot checks.
-     */
-    args.push(
-        '--extractor-args',
-        'youtube:player-client=web_safari'
-    );
-
-    return args;
-}
 
 function hasBgutilProvider() {
     return Boolean(
         String(
-            process.env.CRYSTAL_POT_URL ||
-            ''
+            process.env.CRYSTAL_POT_URL || ''
         ).trim() ||
         getBgutilScriptPath()
     );
 }
 
-/* ==========================================================================
+
+/* ============================================================================
    HELPERS
-========================================================================== */
+============================================================================ */
 
 function createTempDirectory() {
     const folder = path.join(
@@ -224,12 +214,16 @@ function createTempDirectory() {
         `job-${Date.now()}-${crypto.randomBytes(5).toString('hex')}`
     );
 
-    fs.mkdirSync(folder, {
-        recursive: true
-    });
+    fs.mkdirSync(
+        folder,
+        {
+            recursive: true
+        }
+    );
 
     return folder;
 }
+
 
 function cleanupDirectory(directory) {
     if (!directory) {
@@ -238,10 +232,13 @@ function cleanupDirectory(directory) {
 
     try {
         if (fs.existsSync(directory)) {
-            fs.rmSync(directory, {
-                recursive: true,
-                force: true
-            });
+            fs.rmSync(
+                directory,
+                {
+                    recursive: true,
+                    force: true
+                }
+            );
         }
     } catch (error) {
         console.error(
@@ -251,46 +248,91 @@ function cleanupDirectory(directory) {
     }
 }
 
+
 function sanitizeTitle(title) {
-    return String(title || 'Crystal Bot')
-        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
-        .replace(/\s+/g, ' ')
+    return String(
+        title || 'Crystal Bot'
+    )
+        .replace(
+            /[<>:"/\\|?*\x00-\x1F]/g,
+            ''
+        )
+        .replace(
+            /\s+/g,
+            ' '
+        )
         .trim()
-        .slice(0, 150) || 'Crystal Bot';
+        .slice(
+            0,
+            150
+        ) ||
+        'Crystal Bot';
 }
+
 
 function isYouTubeUrl(value) {
     return /^https?:\/\/(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be)\//i
-        .test(String(value || '').trim());
+        .test(
+            String(value || '').trim()
+        );
 }
 
-function formatDuration(seconds) {
-    const value = Number(seconds);
 
-    if (!Number.isFinite(value) || value < 0) {
+function formatDuration(seconds) {
+    const value =
+        Number(seconds);
+
+    if (
+        !Number.isFinite(value) ||
+        value < 0
+    ) {
         return 'Unknown';
     }
 
-    const total = Math.floor(value);
+    const total =
+        Math.floor(value);
 
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const secs = total % 60;
+    const hours =
+        Math.floor(
+            total / 3600
+        );
+
+    const minutes =
+        Math.floor(
+            (total % 3600) / 60
+        );
+
+    const secs =
+        total % 60;
 
     if (hours > 0) {
-        return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        return (
+            `${hours}:` +
+            `${String(minutes).padStart(2, '0')}:` +
+            `${String(secs).padStart(2, '0')}`
+        );
     }
 
-    return `${minutes}:${String(secs).padStart(2, '0')}`;
+    return (
+        `${minutes}:` +
+        `${String(secs).padStart(2, '0')}`
+    );
 }
+
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(
+        resolve => setTimeout(
+            resolve,
+            ms
+        )
+    );
 }
 
-/* ==========================================================================
-   RUN COMMAND
-========================================================================== */
+
+/* ============================================================================
+   RUN PROCESS
+============================================================================ */
 
 function runProcess(
     args,
@@ -299,100 +341,129 @@ function runProcess(
         timeout = DOWNLOAD_TIMEOUT
     } = {}
 ) {
-    return new Promise((resolve, reject) => {
-        const python = getPythonCommand();
+    return new Promise(
+        (resolve, reject) => {
+            const python =
+                getPythonCommand();
 
-        let child;
-
-        try {
-            child = spawn(
-                python,
-                args,
-                {
-                    cwd,
-                    windowsHide: true,
-                    shell: false
-                }
-            );
-        } catch (error) {
-            reject(error);
-            return;
-        }
-
-        let stdout = '';
-        let stderr = '';
-        let finished = false;
-
-        const timer = setTimeout(() => {
-            if (finished) {
-                return;
-            }
-
-            finished = true;
+            let child;
 
             try {
-                child.kill();
-            } catch (_) {}
+                child = spawn(
+                    python,
+                    args,
+                    {
+                        cwd,
+                        windowsHide: true,
+                        shell: false
+                    }
+                );
+            } catch (error) {
+                reject(error);
+                return;
+            }
 
-            reject(
-                new Error(
-                    `Process timed out after ${Math.floor(timeout / 1000)} seconds.`
-                )
+            let stdout = '';
+            let stderr = '';
+            let finished = false;
+
+            const timer =
+                setTimeout(
+                    () => {
+                        if (finished) {
+                            return;
+                        }
+
+                        finished = true;
+
+                        try {
+                            child.kill();
+                        } catch (_) {}
+
+                        reject(
+                            new Error(
+                                `Process timed out after ${Math.floor(timeout / 1000)} seconds.`
+                            )
+                        );
+                    },
+                    timeout
+                );
+
+            if (child.stdout) {
+                child.stdout.on(
+                    'data',
+                    data => {
+                        stdout +=
+                            data.toString();
+                    }
+                );
+            }
+
+            if (child.stderr) {
+                child.stderr.on(
+                    'data',
+                    data => {
+                        stderr +=
+                            data.toString();
+                    }
+                );
+            }
+
+            child.on(
+                'error',
+                error => {
+                    if (finished) {
+                        return;
+                    }
+
+                    finished = true;
+
+                    clearTimeout(timer);
+
+                    reject(error);
+                }
             );
-        }, timeout);
 
-        child.stdout.on('data', data => {
-            stdout += data.toString();
-        });
+            child.on(
+                'close',
+                code => {
+                    if (finished) {
+                        return;
+                    }
 
-        child.stderr.on('data', data => {
-            stderr += data.toString();
-        });
+                    finished = true;
 
-        child.on('error', error => {
-            if (finished) {
-                return;
-            }
+                    clearTimeout(timer);
 
-            finished = true;
-            clearTimeout(timer);
-
-            reject(error);
-        });
-
-        child.on('close', code => {
-            if (finished) {
-                return;
-            }
-
-            finished = true;
-            clearTimeout(timer);
-
-            resolve({
-                code,
-                stdout,
-                stderr
-            });
-        });
-    });
+                    resolve({
+                        code,
+                        stdout,
+                        stderr
+                    });
+                }
+            );
+        }
+    );
 }
 
-/* ==========================================================================
+
+/* ============================================================================
    CHECK YT-DLP
-========================================================================== */
+============================================================================ */
 
 async function checkYtDlp() {
     try {
-        const result = await runProcess(
-            [
-                '-m',
-                'yt_dlp',
-                '--version'
-            ],
-            {
-                timeout: 30000
-            }
-        );
+        const result =
+            await runProcess(
+                [
+                    '-m',
+                    'yt_dlp',
+                    '--version'
+                ],
+                {
+                    timeout: 30000
+                }
+            );
 
         return result.code === 0;
     } catch (_) {
@@ -400,40 +471,58 @@ async function checkYtDlp() {
     }
 }
 
-/* ==========================================================================
-   SEARCH YOUTUBE
-========================================================================== */
 
-async function searchYouTube(query, limit = 5) {
-    const cleanQuery = String(query || '').trim();
+/* ============================================================================
+   SEARCH YOUTUBE
+============================================================================ */
+
+async function searchYouTube(
+    query,
+    limit = 5
+) {
+    const cleanQuery =
+        String(
+            query || ''
+        ).trim();
 
     if (!cleanQuery) {
         return [];
     }
 
-    const result = await runProcess(
-        [
-            '-m',
-            'yt_dlp',
+    /*
+     * IMPORTANT:
+     *
+     * There is NO "-f" here.
+     *
+     * Search only needs metadata.
+     */
 
-            ...getYtDlpCompatibilityArgs(),
+    const args = [
+        '-m',
+        'yt_dlp',
 
-            '--flat-playlist',
+        ...getYtDlpCompatibilityArgs(),
 
-            '--no-warnings',
-            '--ignore-errors',
+        '--flat-playlist',
 
-            '--skip-download',
+        '--ignore-errors',
 
-            '--print',
-            '%(id)s\t%(title)s\t%(duration)s\t%(channel)s',
+        '--skip-download',
 
-            `ytsearch${limit}:${cleanQuery}`
-        ],
-        {
-            timeout: SEARCH_TIMEOUT
-        }
-    );
+        '--print',
+        '%(id)s\t%(title)s\t%(duration)s\t%(channel)s',
+
+        `ytsearch${limit}:${cleanQuery}`
+    ];
+
+    const result =
+        await runProcess(
+            args,
+            {
+                timeout:
+                    SEARCH_TIMEOUT
+            }
+        );
 
     if (result.code !== 0) {
         throw new Error(
@@ -444,16 +533,22 @@ async function searchYouTube(query, limit = 5) {
 
     const results = [];
 
-    for (const line of result.stdout.split(/\r?\n/)) {
-        const trimmed = line.trim();
+    for (
+        const line
+        of result.stdout.split(/\r?\n/)
+    ) {
+        const trimmed =
+            line.trim();
 
         if (!trimmed) {
             continue;
         }
 
-        const parts = trimmed.split('\t');
+        const parts =
+            trimmed.split('\t');
 
-        const id = parts[0];
+        const id =
+            parts[0];
 
         if (!id) {
             continue;
@@ -461,37 +556,48 @@ async function searchYouTube(query, limit = 5) {
 
         results.push({
             id,
-            title: parts[1] || 'Unknown title',
-            duration: parts[2] || 'Unknown',
-            channel: parts[3] || 'Unknown'
+            title:
+                parts[1] ||
+                'Unknown title',
+            duration:
+                parts[2] ||
+                'Unknown',
+            channel:
+                parts[3] ||
+                'Unknown'
         });
     }
 
     return results;
 }
 
-/* ==========================================================================
-   GET VIDEO INFORMATION
-========================================================================== */
+
+/* ============================================================================
+   VIDEO INFO
+============================================================================ */
 
 async function getVideoInfo(url) {
-    const result = await runProcess(
-        [
-            '-m',
-            'yt_dlp',
+    const args = [
+        '-m',
+        'yt_dlp',
 
-            ...getYtDlpCompatibilityArgs(),
+        ...getYtDlpCompatibilityArgs(),
 
-            '--dump-single-json',
-            '--no-warnings',
-            '--skip-download',
+        '--dump-single-json',
 
-            url
-        ],
-        {
-            timeout: SEARCH_TIMEOUT
-        }
-    );
+        '--skip-download',
+
+        url
+    ];
+
+    const result =
+        await runProcess(
+            args,
+            {
+                timeout:
+                    SEARCH_TIMEOUT
+            }
+        );
 
     if (result.code !== 0) {
         throw new Error(
@@ -501,7 +607,9 @@ async function getVideoInfo(url) {
     }
 
     try {
-        return JSON.parse(result.stdout);
+        return JSON.parse(
+            result.stdout
+        );
     } catch (_) {
         throw new Error(
             'YouTube returned invalid video information.'
@@ -509,21 +617,29 @@ async function getVideoInfo(url) {
     }
 }
 
-/* ==========================================================================
-   DOWNLOAD AUDIO
-========================================================================== */
 
-async function downloadAudio(url, directory) {
-    const outputTemplate = path.join(
-        directory,
-        '%(title).150s [%(id)s].%(ext)s'
-    );
+/* ============================================================================
+   DOWNLOAD AUDIO
+============================================================================ */
+
+async function downloadAudio(
+    url,
+    directory,
+    profile = 'default'
+) {
+    const outputTemplate =
+        path.join(
+            directory,
+            '%(title).150s [%(id)s].%(ext)s'
+        );
 
     const args = [
         '-m',
         'yt_dlp',
 
-        ...getYtDlpCompatibilityArgs(),
+        ...getYtDlpCompatibilityArgs(
+            profile
+        ),
 
         '--no-warnings',
         '--no-playlist',
@@ -537,19 +653,28 @@ async function downloadAudio(url, directory) {
         '--file-access-retries',
         '3',
 
+        '--extractor-retries',
+        '3',
+
         '--retry-sleep',
         '2',
 
         '--socket-timeout',
         '30',
 
-        '--concurrent-fragments',
-        '4',
-
         '--newline',
 
+        /*
+         * IMPORTANT:
+         *
+         * ba = best available audio
+         * b  = best available format fallback
+         *
+         * We do NOT force a specific format such as 251.
+         */
+
         '-f',
-        'bestaudio/best',
+        'ba/b',
 
         '-x',
 
@@ -559,9 +684,9 @@ async function downloadAudio(url, directory) {
         '--audio-quality',
         '192K',
 
-        '--embed-thumbnail',
-
         '--add-metadata',
+
+        '--embed-thumbnail',
 
         '-o',
         outputTemplate,
@@ -573,26 +698,35 @@ async function downloadAudio(url, directory) {
         args,
         {
             cwd: directory,
-            timeout: DOWNLOAD_TIMEOUT
+            timeout:
+                DOWNLOAD_TIMEOUT
         }
     );
 }
 
-/* ==========================================================================
-   DOWNLOAD VIDEO
-========================================================================== */
 
-async function downloadVideo(url, directory) {
-    const outputTemplate = path.join(
-        directory,
-        '%(title).150s [%(id)s].%(ext)s'
-    );
+/* ============================================================================
+   DOWNLOAD VIDEO
+============================================================================ */
+
+async function downloadVideo(
+    url,
+    directory,
+    profile = 'default'
+) {
+    const outputTemplate =
+        path.join(
+            directory,
+            '%(title).150s [%(id)s].%(ext)s'
+        );
 
     const args = [
         '-m',
         'yt_dlp',
 
-        ...getYtDlpCompatibilityArgs(),
+        ...getYtDlpCompatibilityArgs(
+            profile
+        ),
 
         '--no-warnings',
         '--no-playlist',
@@ -606,26 +740,26 @@ async function downloadVideo(url, directory) {
         '--file-access-retries',
         '3',
 
+        '--extractor-retries',
+        '3',
+
         '--retry-sleep',
         '2',
 
         '--socket-timeout',
         '30',
 
-        '--concurrent-fragments',
-        '4',
-
         '--newline',
 
         /*
-         * Prefer MP4-compatible streams.
+         * Prefer MP4 streams.
          *
-         * If a separate video/audio stream is needed,
-         * yt-dlp + FFmpeg will merge them.
+         * If separate video/audio streams are needed,
+         * FFmpeg merges them.
          */
 
         '-f',
-        'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best',
+        'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
 
         '--merge-output-format',
         'mp4',
@@ -640,29 +774,43 @@ async function downloadVideo(url, directory) {
         args,
         {
             cwd: directory,
-            timeout: DOWNLOAD_TIMEOUT
+            timeout:
+                DOWNLOAD_TIMEOUT
         }
     );
 }
 
-/* ==========================================================================
-   FIND DOWNLOADED FILE
-========================================================================== */
 
-function findDownloadedFile(directory, extensions = []) {
-    if (!fs.existsSync(directory)) {
+/* ============================================================================
+   FIND DOWNLOADED FILE
+============================================================================ */
+
+function findDownloadedFile(
+    directory,
+    extensions = []
+) {
+    if (
+        !directory ||
+        !fs.existsSync(directory)
+    ) {
         return null;
     }
 
-    const files = fs.readdirSync(directory)
+    const files =
+        fs.readdirSync(
+            directory
+        )
         .filter(file => {
-            const fullPath = path.join(
-                directory,
-                file
-            );
+            const fullPath =
+                path.join(
+                    directory,
+                    file
+                );
 
             try {
-                return fs.statSync(fullPath).isFile();
+                return fs.statSync(
+                    fullPath
+                ).isFile();
             } catch (_) {
                 return false;
             }
@@ -670,41 +818,51 @@ function findDownloadedFile(directory, extensions = []) {
 
     if (!extensions.length) {
         return files.length
-            ? path.join(directory, files[0])
+            ? path.join(
+                directory,
+                files[0]
+            )
             : null;
     }
 
-    const matching = files.filter(file => {
-        const lower = file.toLowerCase();
+    const matching =
+        files.filter(file => {
+            const lower =
+                file.toLowerCase();
 
-        return extensions.some(
-            extension =>
-                lower.endsWith(extension.toLowerCase())
-        );
-    });
+            return extensions.some(
+                extension =>
+                    lower.endsWith(
+                        extension.toLowerCase()
+                    )
+            );
+        });
 
     if (!matching.length) {
         return null;
     }
 
-    /*
-     * Choose the largest file.
-     *
-     * This helps avoid accidentally selecting
-     * a thumbnail or tiny metadata file.
-     */
+    matching.sort(
+        (a, b) => {
+            const sizeA =
+                fs.statSync(
+                    path.join(
+                        directory,
+                        a
+                    )
+                ).size;
 
-    matching.sort((a, b) => {
-        const sizeA = fs.statSync(
-            path.join(directory, a)
-        ).size;
+            const sizeB =
+                fs.statSync(
+                    path.join(
+                        directory,
+                        b
+                    )
+                ).size;
 
-        const sizeB = fs.statSync(
-            path.join(directory, b)
-        ).size;
-
-        return sizeB - sizeA;
-    });
+            return sizeB - sizeA;
+        }
+    );
 
     return path.join(
         directory,
@@ -712,16 +870,16 @@ function findDownloadedFile(directory, extensions = []) {
     );
 }
 
-/* ==========================================================================
+
+/* ============================================================================
    SEND AUDIO
-========================================================================== */
+============================================================================ */
 
 async function sendAudio({
     sock,
     jid,
     file,
-    title,
-    reply
+    title
 }) {
     if (!sock || !jid) {
         throw new Error(
@@ -735,7 +893,8 @@ async function sendAudio({
         );
     }
 
-    const stats = fs.statSync(file);
+    const stats =
+        fs.statSync(file);
 
     if (stats.size < 1000) {
         throw new Error(
@@ -747,10 +906,14 @@ async function sendAudio({
         jid,
         {
             audio: {
-                stream: fs.createReadStream(file)
+                stream:
+                    fs.createReadStream(
+                        file
+                    )
             },
 
-            mimetype: 'audio/mpeg',
+            mimetype:
+                'audio/mpeg',
 
             fileName:
                 `${sanitizeTitle(title)}.mp3`,
@@ -762,9 +925,10 @@ async function sendAudio({
     return true;
 }
 
-/* ==========================================================================
+
+/* ============================================================================
    SEND VIDEO
-========================================================================== */
+============================================================================ */
 
 async function sendVideo({
     sock,
@@ -784,7 +948,8 @@ async function sendVideo({
         );
     }
 
-    const stats = fs.statSync(file);
+    const stats =
+        fs.statSync(file);
 
     if (stats.size < 1000) {
         throw new Error(
@@ -796,10 +961,14 @@ async function sendVideo({
         jid,
         {
             video: {
-                stream: fs.createReadStream(file)
+                stream:
+                    fs.createReadStream(
+                        file
+                    )
             },
 
-            mimetype: 'video/mp4',
+            mimetype:
+                'video/mp4',
 
             fileName:
                 `${sanitizeTitle(title)}.mp4`
@@ -809,9 +978,57 @@ async function sendVideo({
     return true;
 }
 
-/* ==========================================================================
+
+/* ============================================================================
+   ERROR DETECTION
+============================================================================ */
+
+function isFormatError(message) {
+    const value =
+        String(
+            message || ''
+        ).toLowerCase();
+
+    return (
+        value.includes(
+            'requested format is not available'
+        ) ||
+        value.includes(
+            'requested format'
+        )
+    );
+}
+
+
+function isAntiBotError(message) {
+    const value =
+        String(
+            message || ''
+        ).toLowerCase();
+
+    return (
+        value.includes('sign in') ||
+        value.includes('confirm you') ||
+        value.includes('not a bot') ||
+        value.includes('authentication') ||
+        value.includes('login_required')
+    );
+}
+
+
+/* ============================================================================
    DOWNLOAD WITH RETRIES
-========================================================================== */
+============================================================================ */
+
+/*
+ * We try:
+ *
+ *   1. normal yt-dlp client configuration
+ *   2. android_vr fallback
+ *
+ * This is important because YouTube may expose different formats depending
+ * on the client yt-dlp uses.
+ */
 
 async function downloadWithRetries(
     downloader,
@@ -820,103 +1037,194 @@ async function downloadWithRetries(
 ) {
     let lastError = null;
 
-    for (
-        let attempt = 1;
-        attempt <= MAX_RETRIES;
-        attempt++
-    ) {
-        try {
-            console.log(
-                `🎵 Downloader attempt ${attempt}/${MAX_RETRIES}`
-            );
+    const profiles = [
+        'default',
+        'android_vr'
+    ];
 
-            const result =
-                await downloader(
-                    url,
-                    directory
+    for (
+        const profile
+        of profiles
+    ) {
+        for (
+            let attempt = 1;
+            attempt <= MAX_RETRIES;
+            attempt++
+        ) {
+            try {
+                console.log(
+                    `🎵 Downloader profile=${profile} attempt ${attempt}/${MAX_RETRIES}`
                 );
 
-            if (result.code === 0) {
-                return result;
+                const result =
+                    await downloader(
+                        url,
+                        directory,
+                        profile
+                    );
+
+                if (
+                    result.code === 0
+                ) {
+                    return result;
+                }
+
+                const errorText =
+                    (
+                        result.stderr ||
+                        result.stdout ||
+                        ''
+                    ).trim();
+
+                lastError =
+                    new Error(
+                        errorText ||
+                        `Download failed with exit code ${result.code}.`
+                    );
+
+                console.error(
+                    `Downloader profile=${profile} attempt ${attempt} failed:`,
+                    lastError.message
+                );
+
+                /*
+                 * If this profile cannot see a usable format,
+                 * immediately move to the next profile.
+                 */
+
+                if (
+                    isFormatError(
+                        errorText
+                    )
+                ) {
+                    break;
+                }
+            } catch (error) {
+                lastError =
+                    error;
+
+                console.error(
+                    `Downloader profile=${profile} attempt ${attempt} error:`,
+                    error.message
+                );
+
+                /*
+                 * Anti-bot errors may not be fixed by simply retrying.
+                 * Continue to the alternate profile.
+                 */
             }
 
-            lastError = new Error(
-                result.stderr.trim() ||
-                `Download failed with exit code ${result.code}.`
-            );
-
-            console.error(
-                `Downloader attempt ${attempt} failed:`,
-                lastError.message
-            );
-        } catch (error) {
-            lastError = error;
-
-            console.error(
-                `Downloader attempt ${attempt} error:`,
-                error.message
-            );
-        }
-
-        if (attempt < MAX_RETRIES) {
-            await sleep(
-                1500 * attempt
-            );
+            if (
+                attempt < MAX_RETRIES
+            ) {
+                await sleep(
+                    1500 * attempt
+                );
+            }
         }
     }
 
-    throw lastError ||
-        new Error('Download failed.');
+    throw (
+        lastError ||
+        new Error(
+            'Download failed.'
+        )
+    );
 }
 
-/* ==========================================================================
-   ERROR MESSAGE
-========================================================================== */
 
-function friendlyDownloadError(error) {
-    const message = String(
-        error?.message || error || ''
-    ).toLowerCase();
+/* ============================================================================
+   FRIENDLY ERROR
+============================================================================ */
+
+function friendlyDownloadError(
+    error
+) {
+    const original =
+        String(
+            error?.message ||
+            error ||
+            ''
+        );
+
+    const message =
+        original.toLowerCase();
 
     if (
-        message.includes('timed out') ||
-        message.includes('timeout')
+        message.includes(
+            'timed out'
+        ) ||
+        message.includes(
+            'timeout'
+        )
     ) {
         return (
             '⏱️ *DOWNLOAD TIMEOUT*\n\n' +
-            'The video took too long to download.\n' +
+            'The video took too long to download.\n\n' +
             'Try a shorter video or try again.'
         );
     }
 
     if (
-        message.includes('sign in') ||
-        message.includes('confirm you') ||
-        message.includes('not a bot') ||
-        message.includes('authentication') ||
-        message.includes('login_required')
+        isAntiBotError(
+            message
+        )
     ) {
-        if (!hasBgutilProvider()) {
+        if (
+            !hasBgutilProvider()
+        ) {
             return (
                 '🔐 *YOUTUBE ANTI-BOT CHECK*\n\n' +
-                'YouTube is currently requiring a Proof-of-Origin (PO) token for this download.\n\n' +
-                'The downloader code is ready to use a bgutil PO-token provider, but no provider is installed/running yet.\n\n' +
-                'Install the provider, then restart Crystal Bot.\n\n' +
-                'Windows provider script location:\n' +
-                '%USERPROFILE%\\bgutil-ytdlp-pot-provider\\server\\build\\generate_once.js'
+                'YouTube is currently rejecting this download request.\n\n' +
+                'The downloader has already tried multiple yt-dlp client configurations.\n\n' +
+                'Your direct yt-dlp test works, so try the command again first.\n\n' +
+                'If YouTube continues requiring a PO token, a bgutil PO-token provider can be configured later.'
             );
         }
 
         return (
             '🔐 *YOUTUBE ANTI-BOT CHECK*\n\n' +
-            'The PO-token provider was detected, but YouTube still rejected this request.\n\n' +
-            'Try the command again or update the PO-token provider and yt-dlp.'
+            'The configured PO-token provider was detected, but YouTube rejected the request.\n\n' +
+            'Try again or update yt-dlp/provider.'
         );
     }
 
     if (
-        message.includes('private video') ||
-        message.includes('video unavailable')
+        isFormatError(
+            message
+        )
+    ) {
+        return (
+            '⚠️ *YOUTUBE FORMAT ERROR*\n\n' +
+            'YouTube did not expose a compatible downloadable audio format for this request.\n\n' +
+            'Crystal Bot tried multiple yt-dlp client configurations automatically.\n\n' +
+            'Try the command again or try another YouTube result.'
+        );
+    }
+
+    if (
+        message.includes(
+            '403 forbidden'
+        ) ||
+        message.includes(
+            'http error 403'
+        )
+    ) {
+        return (
+            '🚫 *YOUTUBE DOWNLOAD BLOCKED*\n\n' +
+            'YouTube returned HTTP 403 for the selected media stream.\n\n' +
+            'Crystal Bot will retry using another yt-dlp client when possible.\n\n' +
+            'Try the command again.'
+        );
+    }
+
+    if (
+        message.includes(
+            'private video'
+        ) ||
+        message.includes(
+            'video unavailable'
+        )
     ) {
         return (
             '🚫 *VIDEO UNAVAILABLE*\n\n' +
@@ -925,31 +1233,504 @@ function friendlyDownloadError(error) {
     }
 
     if (
-        message.includes('ffmpeg')
+        message.includes(
+            'ffmpeg'
+        )
     ) {
         return (
             '❌ *FFMPEG ERROR*\n\n' +
             'FFmpeg could not process the downloaded media.\n\n' +
-            'Make sure FFmpeg is available in your system PATH.'
+            'Make sure FFmpeg is installed and available in PATH.'
         );
     }
 
     return (
         '❌ *DOWNLOAD FAILED*\n\n' +
-        'The media could not be downloaded after several attempts.\n\n' +
-        'Try the command again or use another video.'
+        'The media could not be downloaded.\n\n' +
+        'Try the command again or use another YouTube video.'
     );
 }
 
-/* ==========================================================================
-   PLUGINS
-========================================================================== */
+
+/* ============================================================================
+   PLAY
+============================================================================ */
+
+async function executePlay(
+    context
+) {
+    const {
+        reply,
+        text,
+        sock,
+        jid
+    } = context;
+
+    const query =
+        String(
+            text || ''
+        ).trim();
+
+    if (!query) {
+        return reply(
+            '🎵 *CRYSTAL PLAY*\n\n' +
+            'Search and download music.\n\n' +
+            'Usage:\n' +
+            '/play song name\n\n' +
+            'Example:\n' +
+            '/play Omah Lay Soso'
+        );
+    }
+
+    const ready =
+        await checkYtDlp();
+
+    if (!ready) {
+        return reply(
+            '❌ *YT-DLP NOT FOUND*\n\n' +
+            'Run:\n\n' +
+            'python -m pip install -U yt-dlp\n\n' +
+            'Then restart Crystal Bot.'
+        );
+    }
+
+    let directory = null;
+
+    try {
+        await reply(
+            '🔎 *SEARCHING YOUTUBE...*\n\n' +
+            `🎵 ${query}`
+        );
+
+        const results =
+            await searchYouTube(
+                query,
+                5
+            );
+
+        if (!results.length) {
+            return reply(
+                '❌ No YouTube results were found.'
+            );
+        }
+
+        const video =
+            results[0];
+
+        const url =
+            `https://www.youtube.com/watch?v=${video.id}`;
+
+        await reply(
+            '⬇️ *DOWNLOADING MUSIC...*\n\n' +
+            `🎵 ${video.title}\n` +
+            `👤 ${video.channel}\n` +
+            `⏱️ ${formatDuration(video.duration)}\n\n` +
+            'Please wait...'
+        );
+
+        directory =
+            createTempDirectory();
+
+        await downloadWithRetries(
+            downloadAudio,
+            url,
+            directory
+        );
+
+        const file =
+            findDownloadedFile(
+                directory,
+                ['.mp3']
+            );
+
+        if (!file) {
+            throw new Error(
+                'MP3 file was not created.'
+            );
+        }
+
+        await sendAudio({
+            sock,
+            jid,
+            file,
+            title:
+                video.title
+        });
+
+        console.log(
+            `✅ MP3 sent: ${video.title}`
+        );
+    } catch (error) {
+        console.error(
+            '❌ /play error:',
+            error
+        );
+
+        await reply(
+            friendlyDownloadError(
+                error
+            )
+        );
+    } finally {
+        cleanupDirectory(
+            directory
+        );
+    }
+}
+
+
+/* ============================================================================
+   SONG
+============================================================================ */
+
+async function executeSong(
+    context
+) {
+    const query =
+        String(
+            context.text || ''
+        ).trim();
+
+    if (!query) {
+        return context.reply(
+            '🎵 Usage:\n' +
+            '/song song name'
+        );
+    }
+
+    return executePlay(
+        context
+    );
+}
+
+
+/* ============================================================================
+   YTMP3
+============================================================================ */
+
+async function executeYtmp3(
+    context
+) {
+    const {
+        reply,
+        text,
+        sock,
+        jid
+    } = context;
+
+    const url =
+        String(
+            text || ''
+        ).trim();
+
+    if (!url) {
+        return reply(
+            '🎵 *YOUTUBE MP3*\n\n' +
+            'Usage:\n' +
+            '/ytmp3 YouTube URL'
+        );
+    }
+
+    if (!isYouTubeUrl(url)) {
+        return reply(
+            '❌ Please provide a valid YouTube URL.'
+        );
+    }
+
+    const ready =
+        await checkYtDlp();
+
+    if (!ready) {
+        return reply(
+            '❌ yt-dlp is not installed.\n\n' +
+            'Run:\n' +
+            'python -m pip install -U yt-dlp'
+        );
+    }
+
+    let directory = null;
+
+    try {
+        await reply(
+            '🔎 Reading YouTube video...'
+        );
+
+        const info =
+            await getVideoInfo(
+                url
+            );
+
+        await reply(
+            '⬇️ *DOWNLOADING MP3...*\n\n' +
+            `🎵 ${info.title || 'YouTube audio'}\n` +
+            `👤 ${info.uploader || 'Unknown'}\n` +
+            `⏱️ ${formatDuration(info.duration)}`
+        );
+
+        directory =
+            createTempDirectory();
+
+        await downloadWithRetries(
+            downloadAudio,
+            url,
+            directory
+        );
+
+        const file =
+            findDownloadedFile(
+                directory,
+                ['.mp3']
+            );
+
+        if (!file) {
+            throw new Error(
+                'MP3 file was not created.'
+            );
+        }
+
+        await sendAudio({
+            sock,
+            jid,
+            file,
+            title:
+                info.title ||
+                'Crystal Bot Audio'
+        });
+
+        console.log(
+            `✅ /ytmp3 completed: ${info.title}`
+        );
+    } catch (error) {
+        console.error(
+            '❌ /ytmp3 error:',
+            error
+        );
+
+        await reply(
+            friendlyDownloadError(
+                error
+            )
+        );
+    } finally {
+        cleanupDirectory(
+            directory
+        );
+    }
+}
+
+
+/* ============================================================================
+   YTMP4
+============================================================================ */
+
+async function executeYtmp4(
+    context
+) {
+    const {
+        reply,
+        text,
+        sock,
+        jid
+    } = context;
+
+    const url =
+        String(
+            text || ''
+        ).trim();
+
+    if (!url) {
+        return reply(
+            '🎥 *YOUTUBE MP4*\n\n' +
+            'Usage:\n' +
+            '/ytmp4 YouTube URL'
+        );
+    }
+
+    if (!isYouTubeUrl(url)) {
+        return reply(
+            '❌ Please provide a valid YouTube URL.'
+        );
+    }
+
+    const ready =
+        await checkYtDlp();
+
+    if (!ready) {
+        return reply(
+            '❌ yt-dlp is not installed.\n\n' +
+            'Run:\n' +
+            'python -m pip install -U yt-dlp'
+        );
+    }
+
+    let directory = null;
+
+    try {
+        await reply(
+            '🔎 Reading YouTube video...'
+        );
+
+        const info =
+            await getVideoInfo(
+                url
+            );
+
+        await reply(
+            '🎥 *DOWNLOADING VIDEO...*\n\n' +
+            `🎬 ${info.title || 'YouTube video'}\n` +
+            `⏱️ ${formatDuration(info.duration)}\n\n` +
+            'Please wait...'
+        );
+
+        directory =
+            createTempDirectory();
+
+        await downloadWithRetries(
+            downloadVideo,
+            url,
+            directory
+        );
+
+        const file =
+            findDownloadedFile(
+                directory,
+                ['.mp4']
+            );
+
+        if (!file) {
+            throw new Error(
+                'MP4 file was not created.'
+            );
+        }
+
+        await sendVideo({
+            sock,
+            jid,
+            file,
+            title:
+                info.title ||
+                'Crystal Bot Video'
+        });
+
+        console.log(
+            `✅ /ytmp4 completed: ${info.title}`
+        );
+    } catch (error) {
+        console.error(
+            '❌ /ytmp4 error:',
+            error
+        );
+
+        await reply(
+            friendlyDownloadError(
+                error
+            )
+        );
+    } finally {
+        cleanupDirectory(
+            directory
+        );
+    }
+}
+
+
+/* ============================================================================
+   YTSEARCH
+============================================================================ */
+
+async function executeYtSearch(
+    context
+) {
+    const {
+        reply,
+        text
+    } = context;
+
+    const query =
+        String(
+            text || ''
+        ).trim();
+
+    if (!query) {
+        return reply(
+            '🔎 *YOUTUBE SEARCH*\n\n' +
+            'Usage:\n' +
+            '/ytsearch song name\n\n' +
+            'Example:\n' +
+            '/ytsearch Omah Lay Soso'
+        );
+    }
+
+    const ready =
+        await checkYtDlp();
+
+    if (!ready) {
+        return reply(
+            '❌ yt-dlp is not installed.\n\n' +
+            'Run:\n' +
+            'python -m pip install -U yt-dlp'
+        );
+    }
+
+    try {
+        await reply(
+            '🔎 Searching YouTube...'
+        );
+
+        const results =
+            await searchYouTube(
+                query,
+                5
+            );
+
+        if (!results.length) {
+            return reply(
+                '❌ No YouTube results found.'
+            );
+        }
+
+        let output =
+            '╭━━━〔 🔎 YOUTUBE SEARCH 〕━━━╮\n' +
+            '┃\n';
+
+        results.forEach(
+            (video, index) => {
+                output +=
+                    `┃ ${index + 1}. *${video.title}*\n` +
+                    `┃    👤 ${video.channel}\n` +
+                    `┃    ⏱️ ${formatDuration(video.duration)}\n` +
+                    `┃    🔗 https://youtu.be/${video.id}\n` +
+                    '┃\n';
+            }
+        );
+
+        output +=
+            '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
+            '💎 Crystal Bot';
+
+        await reply(
+            output
+        );
+    } catch (error) {
+        console.error(
+            '❌ /ytsearch error:',
+            error
+        );
+
+        await reply(
+            '❌ *SEARCH FAILED*\n\n' +
+            'YouTube search could not be completed.\n' +
+            'Try again in a moment.'
+        );
+    }
+}
+
+
+/* ============================================================================
+   PLUGIN EXPORT
+============================================================================ */
 
 module.exports = [
-
-    /* ======================================================================
-       PLAY
-    ====================================================================== */
 
     {
         name: 'play',
@@ -965,126 +1746,9 @@ module.exports = [
         category:
             'DOWNLOADER',
 
-        async execute(context) {
-            const {
-                reply,
-                text,
-                sock,
-                jid
-            } = context;
-
-            const query =
-                String(text || '').trim();
-
-            if (!query) {
-                return reply(
-                    '🎵 *CRYSTAL PLAY*\n\n' +
-                    'Search and download music.\n\n' +
-                    'Usage:\n' +
-                    '/play song name\n\n' +
-                    'Example:\n' +
-                    '/play Omah Lay Soso'
-                );
-            }
-
-            const ready =
-                await checkYtDlp();
-
-            if (!ready) {
-                return reply(
-                    '❌ *YT-DLP NOT FOUND*\n\n' +
-                    'Run this in PowerShell:\n\n' +
-                    'python -m pip install -U yt-dlp\n\n' +
-                    'Then restart Crystal Bot.'
-                );
-            }
-
-            let directory = null;
-
-            try {
-                await reply(
-                    '🔎 *SEARCHING YOUTUBE...*\n\n' +
-                    `🎵 ${query}`
-                );
-
-                const results =
-                    await searchYouTube(
-                        query,
-                        5
-                    );
-
-                if (!results.length) {
-                    return reply(
-                        '❌ No YouTube results were found.'
-                    );
-                }
-
-                const video =
-                    results[0];
-
-                const url =
-                    `https://www.youtube.com/watch?v=${video.id}`;
-
-                await reply(
-                    '⬇️ *DOWNLOADING MUSIC...*\n\n' +
-                    `🎵 ${video.title}\n` +
-                    `👤 ${video.channel}\n` +
-                    `⏱️ ${formatDuration(video.duration)}\n\n` +
-                    'Please wait...'
-                );
-
-                directory =
-                    createTempDirectory();
-
-                await downloadWithRetries(
-                    downloadAudio,
-                    url,
-                    directory
-                );
-
-                const file =
-                    findDownloadedFile(
-                        directory,
-                        ['.mp3']
-                    );
-
-                if (!file) {
-                    throw new Error(
-                        'MP3 file was not created.'
-                    );
-                }
-
-                await sendAudio({
-                    sock,
-                    jid,
-                    file,
-                    title: video.title,
-                    reply
-                });
-
-                console.log(
-                    `✅ MP3 sent: ${video.title}`
-                );
-            } catch (error) {
-                console.error(
-                    '❌ /play error:',
-                    error
-                );
-
-                await reply(
-                    friendlyDownloadError(error)
-                );
-            } finally {
-                cleanupDirectory(
-                    directory
-                );
-            }
-        }
+        execute:
+            executePlay
     },
-
-    /* ======================================================================
-       SONG
-    ====================================================================== */
 
     {
         name: 'song',
@@ -1099,126 +1763,9 @@ module.exports = [
         category:
             'DOWNLOADER',
 
-        async execute(context) {
-            /*
-             * Keep /song compatible with /play.
-             *
-             * The command handler normally resolves aliases,
-             * but this fallback makes the plugin useful even if
-             * aliases are handled differently by the loader.
-             */
-
-            const query =
-                String(
-                    context.text || ''
-                ).trim();
-
-            if (!query) {
-                return context.reply(
-                    '🎵 Usage:\n' +
-                    '/song song name'
-                );
-            }
-
-            /*
-             * Call the same implementation directly.
-             */
-
-            const {
-                reply,
-                sock,
-                jid
-            } = context;
-
-            let directory = null;
-
-            try {
-                const ready =
-                    await checkYtDlp();
-
-                if (!ready) {
-                    return reply(
-                        '❌ yt-dlp is not installed.\n\n' +
-                        'Run:\n' +
-                        'python -m pip install -U yt-dlp'
-                    );
-                }
-
-                await reply(
-                    '🔎 Searching for your song...'
-                );
-
-                const results =
-                    await searchYouTube(
-                        query,
-                        5
-                    );
-
-                if (!results.length) {
-                    return reply(
-                        '❌ No results found.'
-                    );
-                }
-
-                const video =
-                    results[0];
-
-                const url =
-                    `https://www.youtube.com/watch?v=${video.id}`;
-
-                await reply(
-                    '⬇️ Downloading MP3...\n\n' +
-                    `🎵 ${video.title}`
-                );
-
-                directory =
-                    createTempDirectory();
-
-                await downloadWithRetries(
-                    downloadAudio,
-                    url,
-                    directory
-                );
-
-                const file =
-                    findDownloadedFile(
-                        directory,
-                        ['.mp3']
-                    );
-
-                if (!file) {
-                    throw new Error(
-                        'MP3 was not created.'
-                    );
-                }
-
-                await sendAudio({
-                    sock,
-                    jid,
-                    file,
-                    title: video.title,
-                    reply
-                });
-            } catch (error) {
-                console.error(
-                    '❌ /song error:',
-                    error
-                );
-
-                await reply(
-                    friendlyDownloadError(error)
-                );
-            } finally {
-                cleanupDirectory(
-                    directory
-                );
-            }
-        }
+        execute:
+            executeSong
     },
-
-    /* ======================================================================
-       YTMP3
-    ====================================================================== */
 
     {
         name: 'ytmp3',
@@ -1234,113 +1781,9 @@ module.exports = [
         category:
             'DOWNLOADER',
 
-        async execute(context) {
-            const {
-                reply,
-                text,
-                sock,
-                jid
-            } = context;
-
-            const url =
-                String(text || '').trim();
-
-            if (!url) {
-                return reply(
-                    '🎵 *YOUTUBE MP3*\n\n' +
-                    'Usage:\n' +
-                    '/ytmp3 YouTube URL'
-                );
-            }
-
-            if (!isYouTubeUrl(url)) {
-                return reply(
-                    '❌ Please provide a valid YouTube URL.'
-                );
-            }
-
-            let directory = null;
-
-            try {
-                const ready =
-                    await checkYtDlp();
-
-                if (!ready) {
-                    return reply(
-                        '❌ yt-dlp is not installed.\n\n' +
-                        'Run:\n' +
-                        'python -m pip install -U yt-dlp'
-                    );
-                }
-
-                await reply(
-                    '🔎 Reading YouTube video...'
-                );
-
-                const info =
-                    await getVideoInfo(url);
-
-                await reply(
-                    '⬇️ *DOWNLOADING MP3...*\n\n' +
-                    `🎵 ${info.title || 'YouTube audio'}\n` +
-                    `👤 ${info.uploader || 'Unknown'}\n` +
-                    `⏱️ ${formatDuration(info.duration)}`
-                );
-
-                directory =
-                    createTempDirectory();
-
-                await downloadWithRetries(
-                    downloadAudio,
-                    url,
-                    directory
-                );
-
-                const file =
-                    findDownloadedFile(
-                        directory,
-                        ['.mp3']
-                    );
-
-                if (!file) {
-                    throw new Error(
-                        'MP3 file was not created.'
-                    );
-                }
-
-                await sendAudio({
-                    sock,
-                    jid,
-                    file,
-                    title:
-                        info.title ||
-                        'Crystal Bot Audio',
-                    reply
-                });
-
-                console.log(
-                    `✅ /ytmp3 completed: ${info.title}`
-                );
-            } catch (error) {
-                console.error(
-                    '❌ /ytmp3 error:',
-                    error
-                );
-
-                await reply(
-                    friendlyDownloadError(error)
-                );
-            } finally {
-                cleanupDirectory(
-                    directory
-                );
-            }
-        }
+        execute:
+            executeYtmp3
     },
-
-    /* ======================================================================
-       YTMP4
-    ====================================================================== */
 
     {
         name: 'ytmp4',
@@ -1355,112 +1798,9 @@ module.exports = [
         category:
             'DOWNLOADER',
 
-        async execute(context) {
-            const {
-                reply,
-                text,
-                sock,
-                jid
-            } = context;
-
-            const url =
-                String(text || '').trim();
-
-            if (!url) {
-                return reply(
-                    '🎥 *YOUTUBE MP4*\n\n' +
-                    'Usage:\n' +
-                    '/ytmp4 YouTube URL'
-                );
-            }
-
-            if (!isYouTubeUrl(url)) {
-                return reply(
-                    '❌ Please provide a valid YouTube URL.'
-                );
-            }
-
-            let directory = null;
-
-            try {
-                const ready =
-                    await checkYtDlp();
-
-                if (!ready) {
-                    return reply(
-                        '❌ yt-dlp is not installed.\n\n' +
-                        'Run:\n' +
-                        'python -m pip install -U yt-dlp'
-                    );
-                }
-
-                await reply(
-                    '🔎 Reading YouTube video...'
-                );
-
-                const info =
-                    await getVideoInfo(url);
-
-                await reply(
-                    '🎥 *DOWNLOADING VIDEO...*\n\n' +
-                    `🎬 ${info.title || 'YouTube video'}\n` +
-                    `⏱️ ${formatDuration(info.duration)}\n\n` +
-                    'Please wait...'
-                );
-
-                directory =
-                    createTempDirectory();
-
-                await downloadWithRetries(
-                    downloadVideo,
-                    url,
-                    directory
-                );
-
-                const file =
-                    findDownloadedFile(
-                        directory,
-                        ['.mp4']
-                    );
-
-                if (!file) {
-                    throw new Error(
-                        'MP4 file was not created.'
-                    );
-                }
-
-                await sendVideo({
-                    sock,
-                    jid,
-                    file,
-                    title:
-                        info.title ||
-                        'Crystal Bot Video'
-                });
-
-                console.log(
-                    `✅ /ytmp4 completed: ${info.title}`
-                );
-            } catch (error) {
-                console.error(
-                    '❌ /ytmp4 error:',
-                    error
-                );
-
-                await reply(
-                    friendlyDownloadError(error)
-                );
-            } finally {
-                cleanupDirectory(
-                    directory
-                );
-            }
-        }
+        execute:
+            executeYtmp4
     },
-
-    /* ======================================================================
-       YTSEARCH
-    ====================================================================== */
 
     {
         name: 'ytsearch',
@@ -1476,84 +1816,8 @@ module.exports = [
         category:
             'DOWNLOADER',
 
-        async execute({
-            reply,
-            text
-        }) {
-            const query =
-                String(text || '').trim();
-
-            if (!query) {
-                return reply(
-                    '🔎 *YOUTUBE SEARCH*\n\n' +
-                    'Usage:\n' +
-                    '/ytsearch song name\n\n' +
-                    'Example:\n' +
-                    '/ytsearch Omah Lay Soso'
-                );
-            }
-
-            try {
-                const ready =
-                    await checkYtDlp();
-
-                if (!ready) {
-                    return reply(
-                        '❌ yt-dlp is not installed.\n\n' +
-                        'Run:\n' +
-                        'python -m pip install -U yt-dlp'
-                    );
-                }
-
-                await reply(
-                    '🔎 Searching YouTube...'
-                );
-
-                const results =
-                    await searchYouTube(
-                        query,
-                        5
-                    );
-
-                if (!results.length) {
-                    return reply(
-                        '❌ No YouTube results found.'
-                    );
-                }
-
-                let output =
-                    '╭━━━〔 🔎 YOUTUBE SEARCH 〕━━━╮\n' +
-                    '┃\n';
-
-                results.forEach(
-                    (video, index) => {
-                        output +=
-                            `┃ ${index + 1}. *${video.title}*\n` +
-                            `┃    👤 ${video.channel}\n` +
-                            `┃    ⏱️ ${formatDuration(video.duration)}\n` +
-                            `┃    🔗 https://youtu.be/${video.id}\n` +
-                            '┃\n';
-                    }
-                );
-
-                output +=
-                    '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
-                    '💎 Crystal Bot';
-
-                await reply(output);
-            } catch (error) {
-                console.error(
-                    '❌ /ytsearch error:',
-                    error
-                );
-
-                await reply(
-                    '❌ *SEARCH FAILED*\n\n' +
-                    'YouTube search could not be completed.\n' +
-                    'Try again in a moment.'
-                );
-            }
-        }
+        execute:
+            executeYtSearch
     }
 
 ];
